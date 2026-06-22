@@ -1,3 +1,4 @@
+// import { PDFDocument } from 'pdf-lib';
 import { useState } from 'react';
 import {
   View,
@@ -24,14 +25,8 @@ export default function HomeScreen() {
     }
   };
 
-const createPdf = async () => {
-  console.log(images);
-
-  alert(`${images.length}枚の画像があります`);
-
-  const pdfDoc = await PDFDocument.create();
-
-  console.log("PDF作成成功");
+const createPdf = () => {
+  alert("PDF生成機能は開発中です");
 };
 
   return (
