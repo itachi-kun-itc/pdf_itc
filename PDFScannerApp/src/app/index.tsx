@@ -1,72 +1,110 @@
-import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  Image,
+  ScrollView,
+} from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 
 export default function HomeScreen() {
+  const [images, setImages] = useState<string[]>([]);
 
   const scanDocument = async () => {
-    const permission = await ImagePicker.requestCameraPermissionsAsync();
-
-    if (!permission.granted) {
-      Alert.alert('エラー', 'カメラの権限が必要です');
-      return;
-    }
-
-    const result = await ImagePicker.launchCameraAsync({
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
       quality: 1,
-      allowsEditing: true,
     });
 
     if (!result.canceled) {
-      Alert.alert('撮影成功');
-      console.log(result.assets[0].uri);
+      setImages((prev) => [...prev, result.assets[0].uri]);
     }
   };
 
+const createPdf = async () => {
+  console.log(images);
+
+  alert(`${images.length}枚の画像があります`);
+
+  const pdfDoc = await PDFDocument.create();
+
+  console.log("PDF作成成功");
+};
+
   return (
-    <View style={styles.container}>
+    <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>PDFスキャナー</Text>
 
       <TouchableOpacity style={styles.button} onPress={scanDocument}>
         <Text style={styles.buttonText}>📷 スキャン開始</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.button}>
-        <Text style={styles.buttonText}>📄 PDF追加</Text>
+      <TouchableOpacity style={styles.button} onPress={createPdf}>
+        <Text style={styles.buttonText}>📄 PDF生成</Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.button}>
-        <Text style={styles.buttonText}>🔗 PDF結合</Text>
-      </TouchableOpacity>
+      <Text style={styles.sectionTitle}>
+        撮影済みページ ({images.length})
+      </Text>
 
-      <TouchableOpacity style={styles.button}>
-        <Text style={styles.buttonText}>💾 保存</Text>
-      </TouchableOpacity>
-    </View>
+      {images.map((uri, index) => (
+        <View key={index} style={styles.imageContainer}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+  <Text>ページ {index + 1}</Text>
+
+  <TouchableOpacity
+    onPress={() =>
+      setImages(images.filter((_, i) => i !== index))
+    }
+  >
+    <Text>🗑️削除</Text>
+  </TouchableOpacity>
+</View>
+          <Image source={{ uri }} style={styles.image} />
+        </View>
+      ))}
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    justifyContent: 'center',
     padding: 20,
+    paddingTop: 60,
   },
   title: {
     fontSize: 32,
     fontWeight: 'bold',
     textAlign: 'center',
-    marginBottom: 40,
+    marginBottom: 30,
   },
   button: {
     backgroundColor: '#007AFF',
     padding: 18,
     borderRadius: 12,
-    marginBottom: 15,
+    marginBottom: 20,
   },
   buttonText: {
     color: 'white',
     fontSize: 18,
     textAlign: 'center',
     fontWeight: '600',
+  },
+  sectionTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    marginBottom: 15,
+  },
+  imageContainer: {
+    marginBottom: 20,
+  },
+  image: {
+    width: '100%',
+    height: 250,
+    borderRadius: 10,
+    marginTop: 8,
   },
 });
