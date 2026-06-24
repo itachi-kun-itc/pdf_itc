@@ -17,14 +17,29 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "output": "static",
+      "display": "standalone",
+      "themeColor": "#06152A",
+      "backgroundColor": "#06152A",
+      "name": "PDF Scanner",
+      "shortName": "PDF Scanner",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "このアプリはスキャン画像を取り込むために写真ライブラリへアクセスします。",
+          "cameraPermission": "このアプリはスキャンや撮影のためにカメラへアクセスします。"
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -39,6 +54,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "3e9b9dbe-2427-4909-91de-f14578c99530"
+      }
     }
   }
 }
