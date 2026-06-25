@@ -8,6 +8,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -35,6 +36,7 @@ type PdfHistoryItem = {
   id: string;
   fileName: string;
   uri: string;
+  previewUri?: string;
   createdAt: number;
   pageCount: number;
   fileSize: number;
@@ -47,6 +49,15 @@ type ScannedPageInput = {
   uri: string;
   width?: number;
   height?: number;
+};
+
+type PendingPdf = {
+  id: string;
+  pdfDataUri: string;
+  previewDataUri: string;
+  createdAt: number;
+  pageCount: number;
+  fileSize: number;
 };
 
 const PDF_HISTORY_STORAGE_KEY = 'pdfscanner.createdPdfs.v1';
@@ -191,6 +202,42 @@ const estimateDataUriBytes = (dataUri: string) => {
   return Math.round((base64.length * 3) / 4);
 };
 
+const padDatePart = (value: number) => String(value).padStart(2, '0');
+
+const getDefaultPdfName = () => {
+  const now = new Date();
+  return [
+    now.getFullYear(),
+    padDatePart(now.getMonth() + 1),
+    padDatePart(now.getDate()),
+    `${padDatePart(now.getHours())}:${padDatePart(now.getMinutes())}`,
+  ].join('/');
+};
+
+const toSafePdfFileName = (name: string) => {
+  const trimmed = name.trim() || getDefaultPdfName();
+  const withoutExtension = trimmed.replace(/\.pdf$/i, '');
+  const safeBaseName = withoutExtension
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .replace(/^-+|-+$/g, '') || 'scan';
+
+  return `${safeBaseName}.pdf`;
+};
+
+const dataUriToBlob = (dataUri: string) => {
+  const [header, base64 = ''] = dataUri.split(',');
+  const mimeType = header.match(/data:(.*?);base64/)?.[1] ?? 'application/octet-stream';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([bytes], { type: mimeType });
+};
+
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<ActiveTab>('scan');
@@ -201,6 +248,9 @@ export default function HomeScreen() {
   const [cameraModeVisible, setCameraModeVisible] = useState(false);
   const [webScannerVisible, setWebScannerVisible] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [pendingPdf, setPendingPdf] = useState<PendingPdf | null>(null);
+  const [fileNameModalVisible, setFileNameModalVisible] = useState(false);
+  const [pdfFileNameInput, setPdfFileNameInput] = useState('');
 
   useEffect(() => {
     void readPdfHistory().then(setCreatedPdfs);
@@ -281,48 +331,6 @@ export default function HomeScreen() {
     ]);
   };
 
-  const launchDocumentScan = async () => {
-    if (Platform.OS === 'web') {
-      setStatusMessage('書類スキャンを起動します。カメラの許可を求められたら許可してください。');
-      setWebScannerVisible(true);
-      return;
-    }
-
-    try {
-      setStatusMessage('書類画像を選択してください。選択後に自動でカラー補正します。');
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsMultipleSelection: true,
-        quality: 1,
-      });
-
-      if (result.canceled) {
-        setStatusMessage('書類スキャンがキャンセルされました。');
-        return;
-      }
-
-      const pagesWithDimensions = await Promise.all(
-        result.assets.map(async (asset) => {
-          const scannedPage = await scanDocumentImage(asset.uri);
-
-          return {
-            uri: scannedPage.uri,
-            width: scannedPage.width,
-            height: scannedPage.height,
-          };
-        })
-      );
-
-      addScannedPages(pagesWithDimensions);
-      setStatusMessage(`${pagesWithDimensions.length}枚の書類スキャンを追加しました。`);
-    } catch (error) {
-      console.error('[Scanner] failed to scan document', error);
-      setStatusMessage('書類スキャンに失敗しました。写真から追加または通常の撮影を試してください。');
-      Alert.alert('書類スキャンエラー', error instanceof Error ? error.message : String(error));
-    }
-  };
-
   const createAndSavePdf = async () => {
     if (pages.length === 0) {
       Alert.alert('PDF作成', '先に1枚以上の画像を追加してください。');
@@ -330,38 +338,24 @@ export default function HomeScreen() {
     }
 
     try {
-      setStatusMessage(`PDF作成中... (${pages.length}枚)`);
+      setStatusMessage(`PDF結合中... (${pages.length}枚)`);
 
       const pdf = await createImagePdf(pages);
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const fileName = `scan_${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`;
       const pdfDataUri = pdf.output('datauristring');
-      let uri = pdfDataUri;
-      let fileSize = estimateDataUriBytes(pdfDataUri);
+      const previewDataUri = await getImageDataUrl(pages[0]);
 
-      if (Platform.OS !== 'web') {
-        const FileSystem = await import('expo-file-system/legacy');
-        const pdfBase64 = pdfDataUri.split(',')[1] ?? '';
-        uri = `${FileSystem.documentDirectory}${fileName}`;
-        await FileSystem.writeAsStringAsync(uri, pdfBase64, {
-          encoding: 'base64',
-        });
-        fileSize = Math.round((pdfBase64.length * 3) / 4);
-      }
-
-      const historyItem: PdfHistoryItem = {
+      setPendingPdf({
         id,
-        fileName,
-        uri,
+        pdfDataUri,
+        previewDataUri,
         createdAt: Date.now(),
         pageCount: pages.length,
-        fileSize,
-      };
-      const nextHistory = [historyItem, ...createdPdfs];
-
-      await updateCreatedPdfs(nextHistory);
-      setActiveTab('created');
-      setStatusMessage(`PDFを作成しました: ${fileName}`);
+        fileSize: estimateDataUriBytes(pdfDataUri),
+      });
+      setPdfFileNameInput(getDefaultPdfName());
+      setFileNameModalVisible(true);
+      setStatusMessage('PDFを結合しました。ファイル名を入力してください。');
     } catch (error) {
       console.error('[PDF] failed to create PDF', error);
       setStatusMessage('PDF作成でエラーが発生しました。');
@@ -369,15 +363,84 @@ export default function HomeScreen() {
     }
   };
 
+  const savePendingPdf = async () => {
+    if (!pendingPdf) return;
+
+    try {
+      const fileName = toSafePdfFileName(pdfFileNameInput);
+      let uri = pendingPdf.pdfDataUri;
+      let previewUri = pendingPdf.previewDataUri;
+      let fileSize = pendingPdf.fileSize;
+
+      if (Platform.OS !== 'web') {
+        const FileSystem = await import('expo-file-system/legacy');
+        const pdfBase64 = pendingPdf.pdfDataUri.split(',')[1] ?? '';
+        const previewBase64 = pendingPdf.previewDataUri.split(',')[1] ?? '';
+        uri = `${FileSystem.documentDirectory}${fileName}`;
+        previewUri = `${FileSystem.documentDirectory}${pendingPdf.id}_preview.jpg`;
+        await FileSystem.writeAsStringAsync(uri, pdfBase64, {
+          encoding: 'base64',
+        });
+        await FileSystem.writeAsStringAsync(previewUri, previewBase64, {
+          encoding: 'base64',
+        });
+        fileSize = Math.round((pdfBase64.length * 3) / 4);
+      }
+
+      const historyItem: PdfHistoryItem = {
+        id: pendingPdf.id,
+        fileName,
+        uri,
+        previewUri,
+        createdAt: pendingPdf.createdAt,
+        pageCount: pendingPdf.pageCount,
+        fileSize,
+      };
+      const nextHistory = [historyItem, ...createdPdfs];
+
+      await updateCreatedPdfs(nextHistory);
+      setPendingPdf(null);
+      setFileNameModalVisible(false);
+      setPdfFileNameInput('');
+      setActiveTab('created');
+      setStatusMessage(`PDFを作成しました: ${fileName}`);
+    } catch (error) {
+      console.error('[PDF] failed to save named PDF', error);
+      setStatusMessage('PDF保存でエラーが発生しました。');
+      Alert.alert('PDF保存エラー', error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const cancelPendingPdfName = () => {
+    setPendingPdf(null);
+    setFileNameModalVisible(false);
+    setPdfFileNameInput('');
+    setStatusMessage('PDFの保存をキャンセルしました。');
+  };
+
   const openCreatedPdf = async (item: PdfHistoryItem) => {
     try {
       if (Platform.OS === 'web') {
-        const link = document.createElement('a');
-        link.href = item.uri;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.download = item.fileName;
-        link.click();
+        const blob = dataUriToBlob(item.uri);
+        const file = new File([blob], item.fileName, { type: 'application/pdf' });
+        const shareNavigator = navigator as Navigator & {
+          canShare?: (data: ShareData) => boolean;
+          share?: (data: ShareData) => Promise<void>;
+        };
+        const shareData: ShareData = {
+          title: item.fileName,
+          text: item.fileName,
+          files: [file],
+        };
+
+        if (shareNavigator.share && (!shareNavigator.canShare || shareNavigator.canShare(shareData))) {
+          await shareNavigator.share(shareData);
+          return;
+        }
+
+        const url = URL.createObjectURL(blob);
+        window.open(url, '_blank', 'noopener,noreferrer');
+        window.setTimeout(() => URL.revokeObjectURL(url), 30000);
         return;
       }
 
@@ -410,6 +473,9 @@ export default function HomeScreen() {
       if (Platform.OS !== 'web') {
         const FileSystem = await import('expo-file-system/legacy');
         await FileSystem.deleteAsync(item.uri, { idempotent: true });
+        if (item.previewUri) {
+          await FileSystem.deleteAsync(item.previewUri, { idempotent: true });
+        }
       }
 
       const nextHistory = createdPdfs.filter((pdf) => pdf.id !== item.id);
@@ -563,9 +629,13 @@ export default function HomeScreen() {
       }}
       delayLongPress={450}
     >
-      <View style={styles.pdfIcon}>
-        <Text style={styles.pdfIconText}>PDF</Text>
-      </View>
+      {item.previewUri ? (
+        <Image source={{ uri: item.previewUri }} style={styles.pdfPreview} />
+      ) : (
+        <View style={styles.pdfIcon}>
+          <Text style={styles.pdfIconText}>PDF</Text>
+        </View>
+      )}
       <View style={styles.pageInfo}>
         <Text style={styles.fileName} numberOfLines={1}>
           {item.fileName}
@@ -732,21 +802,7 @@ export default function HomeScreen() {
                 await launchCamera('photo');
               }}
             >
-              <Text style={styles.modalButtonText}>通常の撮影</Text>
-            </Pressable>
-
-            <Pressable
-              style={({ pressed }) => [
-                styles.modalButton,
-                styles.modalButtonSecondary,
-                pressed && styles.buttonPressed,
-              ]}
-              onPress={async () => {
-                setCameraModeVisible(false);
-                await launchDocumentScan();
-              }}
-            >
-              <Text style={styles.modalButtonText}>写真からスキャン</Text>
+              <Text style={styles.modalButtonText}>カメラで撮影</Text>
             </Pressable>
 
             <Pressable
@@ -760,7 +816,7 @@ export default function HomeScreen() {
                 await launchLibrary();
               }}
             >
-              <Text style={styles.modalButtonText}>写真から追加</Text>
+              <Text style={styles.modalButtonText}>写真／ファイルから追加</Text>
             </Pressable>
 
             <Pressable
@@ -788,6 +844,55 @@ export default function HomeScreen() {
           setStatusMessage(`書類スキャンに失敗しました: ${message}`);
         }}
       />
+
+      <Modal
+        visible={fileNameModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={cancelPendingPdfName}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.modalTitle}>PDFのファイル名</Text>
+            <TextInput
+              value={pdfFileNameInput}
+              onChangeText={setPdfFileNameInput}
+              placeholder="YYYY/MM/DD/hh:mm"
+              placeholderTextColor="#7F91AE"
+              autoCapitalize="none"
+              autoCorrect={false}
+              selectTextOnFocus
+              style={styles.fileNameInput}
+              onSubmitEditing={() => {
+                void savePendingPdf();
+              }}
+            />
+            <View style={styles.modalActionRow}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalActionButton,
+                  styles.modalActionSecondary,
+                  pressed && styles.buttonPressed,
+                ]}
+                onPress={cancelPendingPdfName}
+              >
+                <Text style={styles.modalButtonText}>キャンセル</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalActionButton,
+                  pressed && styles.buttonPressed,
+                ]}
+                onPress={() => {
+                  void savePendingPdf();
+                }}
+              >
+                <Text style={styles.modalButtonText}>保存</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={previewVisible} transparent animationType="fade">
         <View style={styles.previewContainer}>
@@ -940,6 +1045,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
   },
+  pdfPreview: {
+    width: 58,
+    height: 74,
+    borderRadius: 8,
+    marginRight: 12,
+    backgroundColor: '#F4F6FA',
+    borderWidth: 1,
+    borderColor: '#526A91',
+    resizeMode: 'cover',
+  },
   thumbnail: {
     width: 70,
     height: 90,
@@ -1067,6 +1182,30 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontSize: 16,
     fontWeight: '600',
+  },
+  fileNameInput: {
+    minHeight: 50,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2D456C',
+    backgroundColor: '#0B1C31',
+    color: '#F5F9FF',
+    fontSize: 16,
+    paddingHorizontal: 14,
+    marginBottom: 16,
+  },
+  modalActionRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalActionButton: {
+    flex: 1,
+    backgroundColor: '#123B73',
+    borderRadius: 12,
+    paddingVertical: 14,
+  },
+  modalActionSecondary: {
+    backgroundColor: '#1B2A45',
   },
   modalCancelButton: {
     paddingVertical: 14,

@@ -29,11 +29,11 @@ const A4_WIDTH = 1240;
 const A4_HEIGHT = 1754;
 const A4_RATIO = A4_HEIGHT / A4_WIDTH;
 const DETECT_INTERVAL_MS = 260;
-const AUTO_CAPTURE_STABLE_MS = 1250;
+const AUTO_CAPTURE_STABLE_MS = 950;
 const AUTO_CAPTURE_COOLDOWN_MS = 2200;
-const DOCUMENT_ACCENT = '#FFD65A';
-const DOCUMENT_RATIO_MIN = 1.08;
-const DOCUMENT_RATIO_MAX = 1.82;
+const DOCUMENT_ACCENT = '#2F86FF';
+const DOCUMENT_RATIO_MIN = 1.16;
+const DOCUMENT_RATIO_MAX = 1.7;
 
 const distance = (a: DocumentPoint, b: DocumentPoint) =>
   Math.hypot(a.x - b.x, a.y - b.y);
@@ -102,14 +102,14 @@ const isDocumentLike = (
   const maxX = Math.max(...points.map((point) => point.x));
   const minY = Math.min(...points.map((point) => point.y));
   const maxY = Math.max(...points.map((point) => point.y));
-  const marginX = frameWidth * 0.025;
-  const marginY = frameHeight * 0.025;
+  const marginX = frameWidth * 0.01;
+  const marginY = frameHeight * 0.01;
 
   if (
-    minX < -marginX ||
-    maxX > frameWidth + marginX ||
-    minY < -marginY ||
-    maxY > frameHeight + marginY
+    minX < marginX ||
+    maxX > frameWidth - marginX ||
+    minY < marginY ||
+    maxY > frameHeight - marginY
   ) {
     return null;
   }
@@ -121,7 +121,7 @@ const isDocumentLike = (
   const averageWidth = (topWidth + bottomWidth) / 2;
   const averageHeight = (leftHeight + rightHeight) / 2;
 
-  if (averageWidth < frameWidth * 0.16 || averageHeight < frameHeight * 0.16) {
+  if (averageWidth < frameWidth * 0.18 || averageHeight < frameHeight * 0.18) {
     return null;
   }
 
@@ -133,8 +133,8 @@ const isDocumentLike = (
   const oppositeHeightBalance = Math.min(leftHeight, rightHeight) / Math.max(leftHeight, rightHeight);
 
   if (ratio < DOCUMENT_RATIO_MIN || ratio > DOCUMENT_RATIO_MAX) return null;
-  if (areaRatio < 0.045 || areaRatio > 0.94) return null;
-  if (oppositeWidthBalance < 0.36 || oppositeHeightBalance < 0.36) return null;
+  if (areaRatio < 0.07 || areaRatio > 0.72) return null;
+  if (oppositeWidthBalance < 0.5 || oppositeHeightBalance < 0.5) return null;
 
   return {
     areaRatio,
@@ -191,10 +191,10 @@ const enhanceDocumentCanvas = (source: HTMLCanvasElement) => {
 };
 
 const fallbackGuideCorners = (width: number, height: number): DocumentCorners => {
-  const guideLeft = width * 0.08;
-  const guideRight = width * 0.92;
-  const guideTop = height * 0.14;
-  const guideBottom = height * 0.8;
+  const guideLeft = width * 0.06;
+  const guideRight = width * 0.94;
+  const guideTop = height * 0.12;
+  const guideBottom = height * 0.84;
   const maxWidth = guideRight - guideLeft;
   const maxHeight = guideBottom - guideTop;
   let cropHeight = maxHeight;
@@ -295,9 +295,9 @@ const drawOverlay = (
   const bottomRight = point(fullCorners.bottomRightCorner);
   const bottomLeft = point(fullCorners.bottomLeftCorner);
 
-  context.fillStyle = 'rgba(255, 214, 90, 0.16)';
+  context.fillStyle = 'rgba(47, 134, 255, 0.18)';
   context.strokeStyle = DOCUMENT_ACCENT;
-  context.lineWidth = 4;
+  context.lineWidth = 6;
   context.lineJoin = 'round';
   context.beginPath();
   context.moveTo(topLeft.x, topLeft.y);
@@ -306,15 +306,6 @@ const drawOverlay = (
   context.lineTo(bottomLeft.x, bottomLeft.y);
   context.closePath();
   context.fill();
-  context.stroke();
-
-  context.strokeStyle = 'rgba(255, 255, 255, 0.82)';
-  context.lineWidth = 1.5;
-  context.beginPath();
-  context.moveTo(topLeft.x, topLeft.y);
-  context.lineTo(bottomRight.x, bottomRight.y);
-  context.moveTo(topRight.x, topRight.y);
-  context.lineTo(bottomLeft.x, bottomLeft.y);
   context.stroke();
 };
 
@@ -614,55 +605,56 @@ const styles = {
   },
   scanFrame: {
     position: 'absolute',
-    left: '8%',
-    right: '8%',
-    top: '14%',
-    bottom: '20%',
-    borderRadius: 18,
+    left: '6%',
+    right: '6%',
+    top: '12%',
+    bottom: '16%',
+    borderRadius: 4,
     pointerEvents: 'none',
-    boxShadow: '0 0 0 9999px rgba(0,0,0,0.22)',
+    boxShadow: '0 0 0 9999px rgba(0,0,0,0.28)',
   },
   frameCorner: {
     position: 'absolute',
-    width: 54,
-    height: 54,
+    width: 46,
+    height: 46,
     borderColor: DOCUMENT_ACCENT,
+    opacity: 0.95,
   },
   frameCornerTopLeft: {
     top: 0,
     left: 0,
-    borderTopWidth: 4,
-    borderLeftWidth: 4,
+    borderTopWidth: 5,
+    borderLeftWidth: 5,
     borderTopStyle: 'solid',
     borderLeftStyle: 'solid',
-    borderTopLeftRadius: 18,
+    borderTopLeftRadius: 4,
   },
   frameCornerTopRight: {
     top: 0,
     right: 0,
-    borderTopWidth: 4,
-    borderRightWidth: 4,
+    borderTopWidth: 5,
+    borderRightWidth: 5,
     borderTopStyle: 'solid',
     borderRightStyle: 'solid',
-    borderTopRightRadius: 18,
+    borderTopRightRadius: 4,
   },
   frameCornerBottomLeft: {
     bottom: 0,
     left: 0,
-    borderBottomWidth: 4,
-    borderLeftWidth: 4,
+    borderBottomWidth: 5,
+    borderLeftWidth: 5,
     borderBottomStyle: 'solid',
     borderLeftStyle: 'solid',
-    borderBottomLeftRadius: 18,
+    borderBottomLeftRadius: 4,
   },
   frameCornerBottomRight: {
     right: 0,
     bottom: 0,
-    borderRightWidth: 4,
-    borderBottomWidth: 4,
+    borderRightWidth: 5,
+    borderBottomWidth: 5,
     borderRightStyle: 'solid',
     borderBottomStyle: 'solid',
-    borderBottomRightRadius: 18,
+    borderBottomRightRadius: 4,
   },
   scanLine: {
     position: 'absolute',
@@ -671,8 +663,8 @@ const styles = {
     top: '50%',
     height: 2,
     borderRadius: 999,
-    background: 'rgba(255, 214, 90, 0.72)',
-    boxShadow: '0 0 18px rgba(255, 214, 90, 0.9)',
+    background: 'rgba(47, 134, 255, 0.65)',
+    boxShadow: '0 0 18px rgba(47, 134, 255, 0.8)',
   },
   flash: {
     position: 'absolute',
