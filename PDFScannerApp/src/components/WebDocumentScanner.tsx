@@ -83,12 +83,19 @@ const A4_HEIGHT = 1754;
 const A4_RATIO = A4_HEIGHT / A4_WIDTH;
 const OUTPUT_LONG_SIDE = A4_HEIGHT;
 const OUTPUT_MIN_SHORT_SIDE = 640;
-const DETECT_INTERVAL_MS = 110;
-const DETECTION_MAX_FRAME_WIDTH = 1120;
+const DETECT_INTERVAL_MS = 150;
+const DETECTION_MAX_FRAME_WIDTH = 1440;
 const DETECTION_HOLD_MS = 4200;
 const AUTO_CAPTURE_STABLE_MS = 650;
 const AUTO_CAPTURE_COOLDOWN_MS = 2200;
 const AUTO_CAPTURE_RECENT_DETECTION_MS = 1500;
+const AUTO_CAPTURE_MIN_SCORE = 1.62;
+const CAPTURE_CORNER_EXPANSION = 0.018;
+const DETECTION_SMALL_SHIFT_THRESHOLD = 0.035;
+const DETECTION_RESET_SHIFT_THRESHOLD = 0.2;
+const DETECTION_SMOOTHING_SOFT = 0.22;
+const DETECTION_SMOOTHING_NORMAL = 0.34;
+const OVERLAY_CORNER_RADIUS = 18;
 const DOCUMENT_ACCENT = '#2F86FF';
 const GUIDE_BOUNDS = {
   left: 0.06,
@@ -186,6 +193,26 @@ const toFullSizeCorners = (
     topRightCorner: scale(corners.topRightCorner),
     bottomLeftCorner: scale(corners.bottomLeftCorner),
     bottomRightCorner: scale(corners.bottomRightCorner),
+  };
+};
+
+const expandCorners = (
+  corners: DocumentCorners,
+  width: number,
+  height: number,
+  amount = CAPTURE_CORNER_EXPANSION
+): DocumentCorners => {
+  const center = averagePoint(cornerList(corners));
+  const expand = (point: DocumentPoint) => ({
+    x: clamp(point.x + (point.x - center.x) * amount, 0, width),
+    y: clamp(point.y + (point.y - center.y) * amount, 0, height),
+  });
+
+  return {
+    topLeftCorner: expand(corners.topLeftCorner),
+    topRightCorner: expand(corners.topRightCorner),
+    bottomLeftCorner: expand(corners.bottomLeftCorner),
+    bottomRightCorner: expand(corners.bottomRightCorner),
   };
 };
 
@@ -464,9 +491,13 @@ const smoothDetectedDocument = (
   }
 
   const shift = detectionShift(current, previous);
-  if (shift > 0.12) return current;
+  if (shift > DETECTION_RESET_SHIFT_THRESHOLD) return current;
 
-  const corners = smoothCorners(previous.corners, current.corners, 0.46);
+  const smoothingAmount =
+    shift < DETECTION_SMALL_SHIFT_THRESHOLD
+      ? DETECTION_SMOOTHING_SOFT
+      : DETECTION_SMOOTHING_NORMAL;
+  const corners = smoothCorners(previous.corners, current.corners, smoothingAmount);
   const points = cornerList(corners);
   return {
     ...current,
@@ -500,6 +531,8 @@ const enhanceDocumentCanvas = (
 
   context.fillStyle = '#fff';
   context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
   context.drawImage(source, 0, 0, canvas.width, canvas.height);
 
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
@@ -558,10 +591,14 @@ const captureScannableShape = (
   frame.getContext('2d')?.drawImage(video, 0, 0, frame.width, frame.height);
 
   if (detected) {
-    const corners = toFullSizeCorners(
-      detected.corners,
-      detected.frameWidth,
-      detected.frameHeight,
+    const corners = expandCorners(
+      toFullSizeCorners(
+        detected.corners,
+        detected.frameWidth,
+        detected.frameHeight,
+        frame.width,
+        frame.height
+      ),
       frame.width,
       frame.height
     );
@@ -587,6 +624,38 @@ const captureScannableShape = (
   }
 
   return enhanceDocumentCanvas(frame);
+};
+
+const roundedPolygonPath = (
+  context: CanvasRenderingContext2D,
+  points: DocumentPoint[],
+  radius: number
+) => {
+  points.forEach((current, index) => {
+    const previous = points[(index + points.length - 1) % points.length];
+    const next = points[(index + 1) % points.length];
+    const previousDistance = Math.max(1, distance(current, previous));
+    const nextDistance = Math.max(1, distance(current, next));
+    const safeRadius = Math.min(radius, previousDistance / 2, nextDistance / 2);
+    const start = {
+      x: current.x + ((previous.x - current.x) / previousDistance) * safeRadius,
+      y: current.y + ((previous.y - current.y) / previousDistance) * safeRadius,
+    };
+    const end = {
+      x: current.x + ((next.x - current.x) / nextDistance) * safeRadius,
+      y: current.y + ((next.y - current.y) / nextDistance) * safeRadius,
+    };
+
+    if (index === 0) {
+      context.moveTo(start.x, start.y);
+    } else {
+      context.lineTo(start.x, start.y);
+    }
+
+    context.quadraticCurveTo(current.x, current.y, end.x, end.y);
+  });
+
+  context.closePath();
 };
 
 const drawOverlay = (
@@ -629,16 +698,20 @@ const drawOverlay = (
 
   context.fillStyle = 'rgba(47, 134, 255, 0.18)';
   context.strokeStyle = DOCUMENT_ACCENT;
-  context.lineWidth = 6;
+  context.lineWidth = 5;
+  context.lineCap = 'round';
   context.lineJoin = 'round';
+  context.shadowColor = 'rgba(47, 134, 255, 0.42)';
+  context.shadowBlur = 14;
   context.beginPath();
-  context.moveTo(topLeft.x, topLeft.y);
-  context.lineTo(topRight.x, topRight.y);
-  context.lineTo(bottomRight.x, bottomRight.y);
-  context.lineTo(bottomLeft.x, bottomLeft.y);
-  context.closePath();
+  roundedPolygonPath(
+    context,
+    [topLeft, topRight, bottomRight, bottomLeft],
+    OVERLAY_CORNER_RADIUS
+  );
   context.fill();
   context.stroke();
+  context.shadowBlur = 0;
 };
 
 export function WebDocumentScanner({
@@ -658,8 +731,10 @@ export function WebDocumentScanner({
   const lastAutoCaptureAtRef = useRef(0);
   const autoCaptureRef = useRef(true);
   const isCapturingRef = useRef(false);
+  const isScannerActiveRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
+  const flashTimeoutRef = useRef<number | null>(null);
   const lastDetectAtRef = useRef(0);
   const [ready, setReady] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
@@ -674,15 +749,32 @@ export function WebDocumentScanner({
   const capture = useCallback(async (reason: 'manual' | 'auto') => {
     const video = videoRef.current;
     const scanner = scannerRef.current;
-    if (!video || !scanner || !video.videoWidth || !video.videoHeight || isCapturingRef.current) return;
+    if (
+      !isScannerActiveRef.current ||
+      !video ||
+      !scanner ||
+      !video.videoWidth ||
+      !video.videoHeight ||
+      isCapturingRef.current
+    ) return;
 
     try {
       isCapturingRef.current = true;
       setIsCapturing(true);
       setCaptureFlash(true);
-      window.setTimeout(() => setCaptureFlash(false), 170);
+      if (flashTimeoutRef.current) {
+        window.clearTimeout(flashTimeoutRef.current);
+      }
+      flashTimeoutRef.current = window.setTimeout(() => {
+        flashTimeoutRef.current = null;
+        if (isScannerActiveRef.current) {
+          setCaptureFlash(false);
+        }
+      }, 170);
       setHint(reason === 'auto' ? '自動撮影しました' : 'スキャンしています');
       const result = await captureScannableShape(video, scanner, detectedRef.current);
+
+      if (!isScannerActiveRef.current) return;
 
       onCapture({
         uri: result.toDataURL('image/jpeg', 0.95),
@@ -694,7 +786,9 @@ export function WebDocumentScanner({
       onError(error instanceof Error ? error.message : 'スキャン画像の作成に失敗しました。');
     } finally {
       isCapturingRef.current = false;
-      setIsCapturing(false);
+      if (isScannerActiveRef.current) {
+        setIsCapturing(false);
+      }
     }
   }, [onCapture, onError]);
 
@@ -702,24 +796,41 @@ export function WebDocumentScanner({
     if (!visible) return undefined;
 
     let active = true;
+    isScannerActiveRef.current = true;
 
     const resetDetection = () => {
       detectedRef.current = null;
       previousDetectedRef.current = null;
       detectedLastSeenAtRef.current = 0;
       stableSinceRef.current = null;
+      lastDetectAtRef.current = 0;
     };
 
     const stop = () => {
+      isScannerActiveRef.current = false;
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
 
+      if (flashTimeoutRef.current) {
+        window.clearTimeout(flashTimeoutRef.current);
+        flashTimeoutRef.current = null;
+      }
+
+      const video = videoRef.current;
+      if (video) {
+        video.pause();
+        video.srcObject = null;
+      }
+
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
+      isCapturingRef.current = false;
       resetDetection();
       setReady(false);
+      setIsCapturing(false);
+      setCaptureFlash(false);
     };
 
     const detect = () => {
@@ -749,37 +860,45 @@ export function WebDocumentScanner({
             if (scannerWindow.cv) {
               const cv = scannerWindow.cv;
               const mat = cv.imread(frameCanvas);
-              const contour = scanner.findPaperContour(mat);
               let nextDetected: DetectedDocument | null = null;
 
-              if (contour) {
-                const corners = scanner.getCornerPoints(contour);
-                if (hasCorners(corners)) {
-                  const match = isScannableShape(corners, frameCanvas.width, frameCanvas.height, 'scanner');
-                  if (match) {
-                    nextDetected = {
-                      corners,
-                      frameWidth: frameCanvas.width,
-                      frameHeight: frameCanvas.height,
-                      areaRatio: match.areaRatio,
-                      center: match.center,
-                      score: match.score,
-                    };
+              try {
+                const contour = scanner.findPaperContour(mat);
+
+                if (contour) {
+                  try {
+                    const corners = scanner.getCornerPoints(contour);
+                    if (hasCorners(corners)) {
+                      const match = isScannableShape(corners, frameCanvas.width, frameCanvas.height, 'scanner');
+                      if (match) {
+                        nextDetected = {
+                          corners,
+                          frameWidth: frameCanvas.width,
+                          frameHeight: frameCanvas.height,
+                          areaRatio: match.areaRatio,
+                          center: match.center,
+                          score: match.score,
+                        };
+                      }
+                    }
+                  } finally {
+                    contour.delete();
                   }
                 }
-                contour.delete();
+
+                const openCvDetected = findOpenCvQuadrilateral(
+                  cv,
+                  mat,
+                  frameCanvas.width,
+                  frameCanvas.height
+                );
+
+                nextDetected = pickBetterDetection(nextDetected, openCvDetected);
+              } catch (error) {
+                console.warn('[WebScanner] document detection skipped frame', error);
+              } finally {
+                mat.delete();
               }
-
-              const openCvDetected = findOpenCvQuadrilateral(
-                cv,
-                mat,
-                frameCanvas.width,
-                frameCanvas.height
-              );
-
-              nextDetected = pickBetterDetection(nextDetected, openCvDetected);
-
-              mat.delete();
 
               if (nextDetected) {
                 const smoothedDetected = smoothDetectedDocument(
@@ -787,6 +906,7 @@ export function WebDocumentScanner({
                   previousDetectedRef.current
                 );
                 const shift = detectionShift(smoothedDetected, previousDetectedRef.current);
+                const previousSeenAt = detectedLastSeenAtRef.current;
                 stableSinceRef.current =
                   shift < 0.07 ? stableSinceRef.current ?? now : now;
                 previousDetectedRef.current = smoothedDetected;
@@ -798,6 +918,8 @@ export function WebDocumentScanner({
                 const canAutoCapture =
                   autoCaptureRef.current &&
                   stableFor > AUTO_CAPTURE_STABLE_MS &&
+                  smoothedDetected.score >= AUTO_CAPTURE_MIN_SCORE &&
+                  (!previousSeenAt || now - previousSeenAt < AUTO_CAPTURE_RECENT_DETECTION_MS) &&
                   now - lastAutoCaptureAtRef.current > AUTO_CAPTURE_COOLDOWN_MS &&
                   !isCapturingRef.current;
 
@@ -853,10 +975,16 @@ export function WebDocumentScanner({
 
         streamRef.current = stream;
         const video = videoRef.current;
-        if (!video) return;
+        if (!video) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
 
         video.srcObject = stream;
         await video.play();
+        if (!active) {
+          return;
+        }
         setReady(true);
         setHint('スキャン対象を枠内に入れてください');
         detect();
@@ -966,52 +1094,52 @@ const styles = {
     right: '3%',
     top: '9.5%',
     bottom: '13.5%',
-    borderRadius: 4,
+    borderRadius: 18,
     pointerEvents: 'none',
     boxShadow: '0 0 0 9999px rgba(0,0,0,0.28)',
   },
   frameCorner: {
     position: 'absolute',
-    width: 46,
-    height: 46,
+    width: 50,
+    height: 50,
     borderColor: DOCUMENT_ACCENT,
-    opacity: 0.95,
+    opacity: 0.88,
   },
   frameCornerTopLeft: {
     top: 0,
     left: 0,
-    borderTopWidth: 5,
-    borderLeftWidth: 5,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
     borderTopStyle: 'solid',
     borderLeftStyle: 'solid',
-    borderTopLeftRadius: 4,
+    borderTopLeftRadius: 18,
   },
   frameCornerTopRight: {
     top: 0,
     right: 0,
-    borderTopWidth: 5,
-    borderRightWidth: 5,
+    borderTopWidth: 4,
+    borderRightWidth: 4,
     borderTopStyle: 'solid',
     borderRightStyle: 'solid',
-    borderTopRightRadius: 4,
+    borderTopRightRadius: 18,
   },
   frameCornerBottomLeft: {
     bottom: 0,
     left: 0,
-    borderBottomWidth: 5,
-    borderLeftWidth: 5,
+    borderBottomWidth: 4,
+    borderLeftWidth: 4,
     borderBottomStyle: 'solid',
     borderLeftStyle: 'solid',
-    borderBottomLeftRadius: 4,
+    borderBottomLeftRadius: 18,
   },
   frameCornerBottomRight: {
     right: 0,
     bottom: 0,
-    borderRightWidth: 5,
-    borderBottomWidth: 5,
+    borderRightWidth: 4,
+    borderBottomWidth: 4,
     borderRightStyle: 'solid',
     borderBottomStyle: 'solid',
-    borderBottomRightRadius: 4,
+    borderBottomRightRadius: 18,
   },
   scanLine: {
     position: 'absolute',

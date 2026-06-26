@@ -507,19 +507,6 @@ const deletePdfHistoryFiles = async (item: PdfHistoryItem) => {
   }
 };
 
-const confirmAsync = (title: string, message: string) =>
-  new Promise<boolean>((resolve) => {
-    if (Platform.OS === 'web') {
-      resolve(window.confirm(`${title}\n\n${message}`));
-      return;
-    }
-
-    Alert.alert(title, message, [
-      { text: 'いいえ', style: 'cancel', onPress: () => resolve(false) },
-      { text: 'はい', style: 'destructive', onPress: () => resolve(true) },
-    ]);
-  });
-
 const estimateDataUriBytes = (dataUri: string) => {
   const base64 = dataUri.split(',')[1] ?? '';
   return Math.round((base64.length * 3) / 4);
@@ -527,10 +514,12 @@ const estimateDataUriBytes = (dataUri: string) => {
 
 const clampPdfProgress = (progress: number) => Math.max(0, Math.min(100, progress));
 
-const waitForNextFrame = () =>
+const waitForUiPaint = () =>
   new Promise<void>((resolve) => {
     if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(() => resolve());
+      requestAnimationFrame(() => {
+        setTimeout(resolve, 0);
+      });
       return;
     }
 
@@ -765,7 +754,7 @@ export default function HomeScreen() {
       setPdfProgressTarget(0);
       setPdfProgressDisplay(0);
       setStatusMessage('PDF結合中...（0％）');
-      await waitForNextFrame();
+      await waitForUiPaint();
 
       const mergedPdf = await createMergedPdf(pages, (progress) => {
         setPdfProgressTarget(clampPdfProgress(progress));
@@ -908,12 +897,6 @@ export default function HomeScreen() {
   };
 
   const deleteCreatedPdf = async (item: PdfHistoryItem) => {
-    const confirmed = await confirmAsync(
-      'PDFを削除しますか？',
-      `${item.fileName} を作成済み履歴から削除します。`
-    );
-    if (!confirmed) return;
-
     let nextHistory: PdfHistoryItem[] = [];
     setCreatedPdfs((currentHistory) => {
       nextHistory = currentHistory.filter((pdf) => !isSamePdfHistoryItem(pdf, item));
@@ -963,6 +946,7 @@ export default function HomeScreen() {
 
   const launchCamera = async (mode: CameraMode) => {
     try {
+      setCameraModeVisible(false);
       setStatusMessage('');
 
       if (Platform.OS === 'web' && mode === 'scan') {
@@ -1000,6 +984,7 @@ export default function HomeScreen() {
 
   const launchLibrary = async () => {
     try {
+      setCameraModeVisible(false);
       setStatusMessage('');
 
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -1029,6 +1014,7 @@ export default function HomeScreen() {
 
   const launchFilePicker = async () => {
     try {
+      setCameraModeVisible(false);
       setStatusMessage('');
 
       const result = await DocumentPicker.getDocumentAsync({
