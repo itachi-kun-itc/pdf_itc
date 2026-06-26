@@ -26,6 +26,7 @@ type ScanPage = {
   id: string;
   sourceType: 'image' | 'pdf';
   uri: string;
+  previewUri?: string;
   fileName: string;
   fileSize: number;
   createdAt: number;
@@ -68,9 +69,40 @@ const PDF_HISTORY_STORAGE_KEY = 'pdfscanner.createdPdfs.v1';
 const PDF_HISTORY_WEB_DB_NAME = 'pdfscanner.history.db';
 const PDF_HISTORY_WEB_STORE_NAME = 'pdfHistory';
 const PDF_HISTORY_WEB_RECORD_KEY = 'items';
+const PDF_HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const CAMERA_PERMISSION_STORAGE_KEY = 'pdfscanner.cameraPermissionAsked.v1';
+const PDFJS_SCRIPT_ID = 'pdfjs-preview-renderer';
+const PDFJS_VERSION = '3.11.174';
 const A4_PORTRAIT_WIDTH = 595.28;
 const A4_PORTRAIT_HEIGHT = 841.89;
+const PDF_IMAGE_PAGE_MARGIN = 36;
+
+type PdfProgressCallback = (progress: number) => void;
+type PdfJsViewport = {
+  width: number;
+  height: number;
+};
+type PdfJsRenderTask = {
+  promise: Promise<void>;
+};
+type PdfJsPage = {
+  getViewport: (options: { scale: number }) => PdfJsViewport;
+  render: (options: {
+    canvasContext: CanvasRenderingContext2D;
+    viewport: PdfJsViewport;
+  }) => PdfJsRenderTask;
+};
+type PdfJsDocument = {
+  getPage: (pageNumber: number) => Promise<PdfJsPage>;
+};
+type PdfJsLib = {
+  GlobalWorkerOptions: {
+    workerSrc: string;
+  };
+  getDocument: (options: { data: Uint8Array }) => {
+    promise: Promise<PdfJsDocument>;
+  };
+};
 
 const isDesktopWeb = () => {
   if (Platform.OS !== 'web') return false;
@@ -102,6 +134,24 @@ const isDocumentPickerImageAsset = (asset: DocumentPicker.DocumentPickerAsset) =
     mimeType.includes('png') ||
     /\.(jpe?g|png)$/i.test(asset.name)
   );
+};
+
+const isImagePickerSupportedAsset = (asset: ImagePicker.ImagePickerAsset) => {
+  const mimeType = asset.mimeType?.toLowerCase() ?? '';
+  const fileName = asset.fileName?.toLowerCase() ?? '';
+  const uri = asset.uri.toLowerCase();
+
+  return (
+    mimeType.includes('jpeg') ||
+    mimeType.includes('jpg') ||
+    mimeType.includes('png') ||
+    /\.(jpe?g|png)$/i.test(fileName) ||
+    /\.(jpe?g|png)(?:\?|#|$)/i.test(uri)
+  );
+};
+
+const warnUnsupportedFiles = () => {
+  Alert.alert('ファイルを追加できません', 'png／jpeg／PDFファイル以外は追加できません。');
 };
 
 const getImageDataUrl = async (page: ScanPage) => {
@@ -154,15 +204,102 @@ const readPdfBase64 = async (page: ScanPage) =>
 
 const getPageCount = (page: ScanPage) => (isPdfPage(page) ? page.pageCount ?? 1 : 1);
 
+const base64ToBytes = (base64: string) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+};
+
+const loadPdfJs = () =>
+  new Promise<PdfJsLib>((resolve, reject) => {
+    if (typeof document === 'undefined') {
+      reject(new Error('PDFプレビューを生成できません。'));
+      return;
+    }
+
+    const pdfJsWindow = window as typeof window & { pdfjsLib?: PdfJsLib };
+    if (pdfJsWindow.pdfjsLib) {
+      resolve(pdfJsWindow.pdfjsLib);
+      return;
+    }
+
+    const existingScript = document.getElementById(PDFJS_SCRIPT_ID) as HTMLScriptElement | null;
+    if (existingScript) {
+      existingScript.addEventListener('load', () => {
+        if (pdfJsWindow.pdfjsLib) resolve(pdfJsWindow.pdfjsLib);
+        else reject(new Error('PDFプレビューを初期化できません。'));
+      }, { once: true });
+      existingScript.addEventListener('error', () => reject(new Error('PDFプレビューを読み込めません。')), {
+        once: true,
+      });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = PDFJS_SCRIPT_ID;
+    script.src = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.js`;
+    script.async = true;
+    script.onload = () => {
+      if (!pdfJsWindow.pdfjsLib) {
+        reject(new Error('PDFプレビューを初期化できません。'));
+        return;
+      }
+
+      resolve(pdfJsWindow.pdfjsLib);
+    };
+    script.onerror = () => reject(new Error('PDFプレビューを読み込めません。'));
+    document.head.appendChild(script);
+  });
+
+const createPdfFirstPagePreviewDataUri = async (base64: string) => {
+  if (Platform.OS !== 'web' || typeof document === 'undefined') return undefined;
+
+  try {
+    const pdfjsLib = await loadPdfJs();
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.min.js`;
+
+    const documentProxy = await pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
+    const page = await documentProxy.getPage(1);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = Math.min(2.2, Math.max(0.5, 360 / baseViewport.width));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+
+    const context = canvas.getContext('2d');
+    if (!context) return undefined;
+
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: context, viewport }).promise;
+
+    return canvas.toDataURL('image/jpeg', 0.88);
+  } catch (error) {
+    console.warn('[PDF] failed to create first page preview', error);
+    return undefined;
+  }
+};
+
 const getContainedImageFrame = (
   imageWidth: number,
   imageHeight: number,
   pageWidth: number,
   pageHeight: number,
+  margin = 0,
 ) => {
   const safeImageWidth = Math.max(1, imageWidth);
   const safeImageHeight = Math.max(1, imageHeight);
-  const scale = Math.min(pageWidth / safeImageWidth, pageHeight / safeImageHeight);
+  const safeMargin = Math.max(0, Math.min(margin, pageWidth / 2, pageHeight / 2));
+  const availableWidth = Math.max(1, pageWidth - safeMargin * 2);
+  const availableHeight = Math.max(1, pageHeight - safeMargin * 2);
+  const scale = Math.min(availableWidth / safeImageWidth, availableHeight / safeImageHeight);
   const width = safeImageWidth * scale;
   const height = safeImageHeight * scale;
 
@@ -182,12 +319,18 @@ const createSingleImagePdfDataUri = async (page: ScanPage) => {
     format: 'a4',
   });
   const imageProperties = probeDocument.getImageProperties(imageDataUrl);
-  const imageWidth = page.width ?? imageProperties.width;
-  const imageHeight = page.height ?? imageProperties.height;
+  const imageWidth = imageProperties.width;
+  const imageHeight = imageProperties.height;
   const isLandscape = imageWidth > imageHeight;
   const pageWidth = isLandscape ? A4_PORTRAIT_HEIGHT : A4_PORTRAIT_WIDTH;
   const pageHeight = isLandscape ? A4_PORTRAIT_WIDTH : A4_PORTRAIT_HEIGHT;
-  const imageFrame = getContainedImageFrame(imageWidth, imageHeight, pageWidth, pageHeight);
+  const imageFrame = getContainedImageFrame(
+    imageWidth,
+    imageHeight,
+    pageWidth,
+    pageHeight,
+    PDF_IMAGE_PAGE_MARGIN,
+  );
   const document = new jsPDF({
     orientation: isLandscape ? 'landscape' : 'portrait',
     unit: 'pt',
@@ -210,14 +353,21 @@ const createSingleImagePdfDataUri = async (page: ScanPage) => {
   };
 };
 
-const createMergedPdf = async (pages: ScanPage[]) => {
+const createMergedPdf = async (pages: ScanPage[], onProgress?: PdfProgressCallback) => {
   console.log('[PDF] creating merged PDF with pdf-lib', { count: pages.length });
 
   const { PDFDocument } = await import('pdf-lib/dist/pdf-lib.esm.min.js');
   const document = await PDFDocument.create();
   let previewDataUri: string | undefined;
+  const totalPages = Math.max(1, pages.length);
+  const pageProgressSpan = 92 / totalPages;
 
-  for (const page of pages) {
+  onProgress?.(2);
+
+  for (const [index, page] of pages.entries()) {
+    const pageStartProgress = 2 + index * pageProgressSpan;
+    onProgress?.(pageStartProgress);
+
     if (isPdfPage(page)) {
       const sourcePdf = await PDFDocument.load(await readPdfBase64(page), {
         ignoreEncryption: true,
@@ -226,10 +376,13 @@ const createMergedPdf = async (pages: ScanPage[]) => {
       copiedPages.forEach((copiedPage) => {
         document.addPage(copiedPage);
       });
+      previewDataUri ??= page.previewUri;
+      onProgress?.(2 + (index + 1) * pageProgressSpan);
       continue;
     }
 
     const imagePdf = await createSingleImagePdfDataUri(page);
+    onProgress?.(pageStartProgress + pageProgressSpan * 0.58);
     const sourcePdf = await PDFDocument.load(imagePdf.pdfDataUri, {
       ignoreEncryption: true,
     });
@@ -237,11 +390,14 @@ const createMergedPdf = async (pages: ScanPage[]) => {
     document.addPage(copiedPage);
 
     previewDataUri ??= imagePdf.previewDataUri;
+    onProgress?.(2 + (index + 1) * pageProgressSpan);
   }
 
+  onProgress?.(96);
   const pdfDataUri = await document.saveAsBase64({
     dataUri: true,
   });
+  onProgress?.(100);
 
   return {
     pdfDataUri,
@@ -344,6 +500,19 @@ const writePdfHistory = async (history: PdfHistoryItem[]) => {
   await FileSystem.writeAsStringAsync(fileUri, JSON.stringify(history));
 };
 
+const isExpiredPdfHistoryItem = (item: PdfHistoryItem, now = Date.now()) =>
+  now - item.createdAt >= PDF_HISTORY_RETENTION_MS;
+
+const deletePdfHistoryFiles = async (item: PdfHistoryItem) => {
+  if (Platform.OS === 'web') return;
+
+  const FileSystem = await import('expo-file-system/legacy');
+  await FileSystem.deleteAsync(item.uri, { idempotent: true });
+  if (item.previewUri) {
+    await FileSystem.deleteAsync(item.previewUri, { idempotent: true });
+  }
+};
+
 const confirmAsync = (title: string, message: string) =>
   new Promise<boolean>((resolve) => {
     if (Platform.OS === 'web') {
@@ -361,6 +530,18 @@ const estimateDataUriBytes = (dataUri: string) => {
   const base64 = dataUri.split(',')[1] ?? '';
   return Math.round((base64.length * 3) / 4);
 };
+
+const clampPdfProgress = (progress: number) => Math.max(0, Math.min(100, progress));
+
+const waitForNextFrame = () =>
+  new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve());
+      return;
+    }
+
+    setTimeout(resolve, 0);
+  });
 
 const padDatePart = (value: number) => String(value).padStart(2, '0');
 
@@ -417,12 +598,47 @@ export default function HomeScreen() {
   const [fileNameModalVisible, setFileNameModalVisible] = useState(false);
   const [pdfFileNameInput, setPdfFileNameInput] = useState('');
   const [isCreatingPdf, setIsCreatingPdf] = useState(false);
+  const [pdfProgressTarget, setPdfProgressTarget] = useState(0);
+  const [pdfProgressDisplay, setPdfProgressDisplay] = useState(0);
   const [isSavingPdf, setIsSavingPdf] = useState(false);
   const [isReorderingPages, setIsReorderingPages] = useState(false);
 
   useEffect(() => {
-    void readPdfHistory().then(setCreatedPdfs);
+    const loadCreatedPdfs = async () => {
+      const history = await readPdfHistory();
+      const activeHistory = history.filter((item) => !isExpiredPdfHistoryItem(item));
+      const expiredHistory = history.filter(isExpiredPdfHistoryItem);
+
+      if (expiredHistory.length > 0) {
+        await Promise.all(expiredHistory.map(deletePdfHistoryFiles));
+        await writePdfHistory(activeHistory);
+        setStatusMessage(`${expiredHistory.length}件の期限切れPDFを自動削除しました。`);
+      }
+
+      setCreatedPdfs(activeHistory);
+    };
+
+    void loadCreatedPdfs();
   }, []);
+
+  useEffect(() => {
+    if (!isCreatingPdf) {
+      return undefined;
+    }
+
+    const interval = window.setInterval(() => {
+      setPdfProgressDisplay((current) => {
+        const gap = pdfProgressTarget - current;
+        if (Math.abs(gap) < 0.4) return pdfProgressTarget;
+
+        return current + Math.max(0.4, Math.abs(gap) * 0.22) * Math.sign(gap);
+      });
+    }, 60);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [isCreatingPdf, pdfProgressTarget]);
 
   useEffect(() => {
     const askInitialCameraPermission = async () => {
@@ -500,13 +716,19 @@ export default function HomeScreen() {
     ]);
   };
 
-  const addPdfPage = (asset: DocumentPicker.DocumentPickerAsset, base64: string, pageCount: number) => {
+  const addPdfPage = (
+    asset: DocumentPicker.DocumentPickerAsset,
+    base64: string,
+    pageCount: number,
+    previewUri?: string
+  ) => {
     setPages((prev) => [
       ...prev,
       {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         sourceType: 'pdf',
         uri: `data:application/pdf;base64,${base64}`,
+        previewUri,
         fileName: asset.name,
         fileSize: asset.size ?? Math.round((base64.length * 3) / 4),
         createdAt: Date.now(),
@@ -546,9 +768,14 @@ export default function HomeScreen() {
 
     try {
       setIsCreatingPdf(true);
-      setStatusMessage(`PDF結合中... (${pages.length}ファイル)`);
+      setPdfProgressTarget(0);
+      setPdfProgressDisplay(0);
+      setStatusMessage('PDF結合中...（0％）');
+      await waitForNextFrame();
 
-      const mergedPdf = await createMergedPdf(pages);
+      const mergedPdf = await createMergedPdf(pages, (progress) => {
+        setPdfProgressTarget(clampPdfProgress(progress));
+      });
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       setPendingPdf({
@@ -569,6 +796,8 @@ export default function HomeScreen() {
       Alert.alert('PDF作成エラー', message);
     } finally {
       setIsCreatingPdf(false);
+      setPdfProgressTarget(0);
+      setPdfProgressDisplay(0);
     }
   };
 
@@ -653,7 +882,6 @@ export default function HomeScreen() {
         };
         const shareData: ShareData = {
           title: item.fileName,
-          text: item.fileName,
           files: [file],
         };
 
@@ -700,14 +928,7 @@ export default function HomeScreen() {
     });
 
     try {
-      if (Platform.OS !== 'web') {
-        const FileSystem = await import('expo-file-system/legacy');
-        await FileSystem.deleteAsync(item.uri, { idempotent: true });
-        if (item.previewUri) {
-          await FileSystem.deleteAsync(item.previewUri, { idempotent: true });
-        }
-      }
-
+      await deletePdfHistoryFiles(item);
       await writePdfHistory(nextHistory);
       setStatusMessage(`${item.fileName} を削除しました。`);
     } catch (error) {
@@ -762,12 +983,6 @@ export default function HomeScreen() {
         return;
       }
 
-      if (isDesktopWeb()) {
-        setStatusMessage('PCブラウザではカメラの起動を省略して、写真の追加に切り替えます。');
-        await launchLibrary();
-        return;
-      }
-
       const permission = await ImagePicker.requestCameraPermissionsAsync();
       if (!permission.granted) {
         setStatusMessage('カメラの権限がありません。');
@@ -801,7 +1016,18 @@ export default function HomeScreen() {
       });
 
       if (!result.canceled) {
-        result.assets.forEach(addImagePage);
+        const supportedAssets = result.assets.filter(isImagePickerSupportedAsset);
+        const skippedFiles = result.assets.length - supportedAssets.length;
+
+        if (skippedFiles > 0) {
+          warnUnsupportedFiles();
+        }
+
+        supportedAssets.forEach(addImagePage);
+
+        if (supportedAssets.length === 0 && skippedFiles > 0) {
+          setStatusMessage('追加できるPDF/JPEG/PNGファイルがありませんでした。');
+        }
       }
     } catch {
       setStatusMessage('ライブラリを開けませんでした。');
@@ -838,7 +1064,8 @@ export default function HomeScreen() {
             const sourcePdf = await PDFDocument.load(fileBase64, {
               ignoreEncryption: true,
             });
-            addPdfPage(asset, fileBase64, sourcePdf.getPageCount());
+            const previewUri = await createPdfFirstPagePreviewDataUri(fileBase64);
+            addPdfPage(asset, fileBase64, sourcePdf.getPageCount(), previewUri);
             addedFiles += 1;
             continue;
           }
@@ -853,6 +1080,10 @@ export default function HomeScreen() {
         }
 
         skippedFiles += 1;
+      }
+
+      if (skippedFiles > 0) {
+        warnUnsupportedFiles();
       }
 
       if (addedFiles > 0) {
@@ -895,7 +1126,9 @@ export default function HomeScreen() {
           <Text style={styles.pageNumberText}>{index + 1}</Text>
         </View>
 
-        {isPdfPage(item) ? (
+        {isPdfPage(item) && item.previewUri ? (
+          <Image source={{ uri: item.previewUri }} style={styles.thumbnail} />
+        ) : isPdfPage(item) ? (
           <PdfPreview uri={item.uri} variant="page" />
         ) : (
           <Pressable
@@ -949,11 +1182,16 @@ export default function HomeScreen() {
       onPress={() => {
         void openCreatedPdf(item);
       }}
-      onLongPress={() => {
-        void deleteCreatedPdf(item);
-      }}
-      delayLongPress={450}
     >
+      <Pressable
+        style={styles.deleteButton}
+        onPress={() => {
+          void deleteCreatedPdf(item);
+        }}
+      >
+        <Text style={styles.deleteText}>✕</Text>
+      </Pressable>
+
       {item.previewUri ? (
         <Image source={{ uri: item.previewUri }} style={styles.pdfPreview} />
       ) : (
@@ -994,12 +1232,21 @@ export default function HomeScreen() {
         </Pressable>
       </View>
 
-      {statusMessage ? (
+      {isCreatingPdf || statusMessage ? (
         <>
-          <Text style={styles.statusText}>{statusMessage}</Text>
+          <Text style={styles.statusText}>
+            {isCreatingPdf
+              ? `PDF結合中...（${Math.round(pdfProgressDisplay)}％）`
+              : statusMessage}
+          </Text>
           {isCreatingPdf ? (
             <View style={styles.statusProgressTrack}>
-              <View style={styles.statusProgressFill} />
+              <View
+                style={[
+                  styles.statusProgressFill,
+                  { width: `${Math.max(0, Math.min(100, pdfProgressDisplay))}%` },
+                ]}
+              />
             </View>
           ) : null}
         </>
@@ -1065,7 +1312,7 @@ export default function HomeScreen() {
                   disabled={isCreatingPdf || isSavingPdf}
                 >
                   <Text style={styles.buttonText}>
-                    {isCreatingPdf ? 'PDF作成中...' : '結合PDFを作成'}
+                    {isCreatingPdf ? 'PDF結合中...' : '結合PDFを作成'}
                   </Text>
                 </Pressable>
               </View>
@@ -1093,7 +1340,7 @@ export default function HomeScreen() {
         >
           <Text style={styles.sectionTitle}>作成済みPDF ({createdPdfs.length})</Text>
           <Text style={styles.emptyText}>
-            PDFをタップすると保存できます。長押しすると削除できます。
+            PDFをタップすると保存できます。作成済みPDFは30日後に自動削除されます。
           </Text>
 
           {createdPdfs.length === 0 ? (
@@ -1154,10 +1401,28 @@ export default function HomeScreen() {
               ]}
               onPress={async () => {
                 setCameraModeVisible(false);
+                if (isDesktopWeb()) {
+                  await launchFilePicker();
+                  return;
+                }
+                await launchLibrary();
+              }}
+            >
+              <Text style={styles.modalButtonText}>写真ライブラリ</Text>
+            </Pressable>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.modalButton,
+                styles.modalButtonSecondary,
+                pressed && styles.buttonPressed,
+              ]}
+              onPress={async () => {
+                setCameraModeVisible(false);
                 await launchFilePicker();
               }}
             >
-              <Text style={styles.modalButtonText}>写真／ファイルから追加</Text>
+              <Text style={styles.modalButtonText}>ファイルを選択</Text>
             </Pressable>
 
             <Pressable
@@ -1337,15 +1602,14 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   statusProgressTrack: {
-    width: 150,
-    height: 3,
+    width: '100%',
+    height: 4,
     overflow: 'hidden',
     borderRadius: 999,
     backgroundColor: '#183252',
     marginTop: 6,
   },
   statusProgressFill: {
-    width: '62%',
     height: '100%',
     borderRadius: 999,
     backgroundColor: '#8FB8FF',
@@ -1391,6 +1655,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 15,
     marginBottom: 12,
+    position: 'relative',
   },
   pdfIcon: {
     width: 58,

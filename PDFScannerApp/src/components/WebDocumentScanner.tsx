@@ -83,8 +83,9 @@ const A4_HEIGHT = 1754;
 const A4_RATIO = A4_HEIGHT / A4_WIDTH;
 const OUTPUT_LONG_SIDE = A4_HEIGHT;
 const OUTPUT_MIN_SHORT_SIDE = 640;
-const DETECT_INTERVAL_MS = 160;
+const DETECT_INTERVAL_MS = 110;
 const DETECTION_MAX_FRAME_WIDTH = 1120;
+const DETECTION_HOLD_MS = 2600;
 const AUTO_CAPTURE_STABLE_MS = 950;
 const AUTO_CAPTURE_COOLDOWN_MS = 2200;
 const DOCUMENT_ACCENT = '#2F86FF';
@@ -94,7 +95,7 @@ const GUIDE_BOUNDS = {
   top: 0.12,
   bottom: 0.84,
 };
-const SHAPE_RATIO_MAX = 3.2;
+const SHAPE_RATIO_MAX = 4.8;
 const CANDIDATE_AREA_WEIGHT = 1.9;
 const CANDIDATE_GUIDE_WEIGHT = 1.25;
 const CANDIDATE_A4_WEIGHT = 0.32;
@@ -273,8 +274,8 @@ const isScannableShape = (
   const maxX = Math.max(...points.map((point) => point.x));
   const minY = Math.min(...points.map((point) => point.y));
   const maxY = Math.max(...points.map((point) => point.y));
-  const marginX = frameWidth * 0.01;
-  const marginY = frameHeight * 0.01;
+  const marginX = frameWidth * 0.003;
+  const marginY = frameHeight * 0.003;
 
   if (
     minX < marginX ||
@@ -292,7 +293,7 @@ const isScannableShape = (
   const averageWidth = (topWidth + bottomWidth) / 2;
   const averageHeight = (leftHeight + rightHeight) / 2;
 
-  if (averageWidth < frameWidth * 0.18 || averageHeight < frameHeight * 0.18) {
+  if (averageWidth < frameWidth * 0.12 || averageHeight < frameHeight * 0.12) {
     return null;
   }
 
@@ -320,8 +321,8 @@ const isScannableShape = (
 
   if (!centerIsInGuide) return null;
   if (ratio > SHAPE_RATIO_MAX) return null;
-  if (areaRatio < 0.045 || areaRatio > 0.82) return null;
-  if (oppositeWidthBalance < 0.32 || oppositeHeightBalance < 0.32) return null;
+  if (areaRatio < 0.025 || areaRatio > 0.92) return null;
+  if (oppositeWidthBalance < 0.18 || oppositeHeightBalance < 0.18) return null;
 
   const a4Closeness = Math.max(0, 1 - Math.abs(ratio - A4_RATIO) / 0.34);
   const sideBalance = (oppositeWidthBalance + oppositeHeightBalance) / 2;
@@ -354,6 +355,15 @@ const cornersFromApprox = (approx: OpenCvMatLike) => {
   return orderCorners(points);
 };
 
+const pickBetterDetection = (
+  current: DetectedDocument | null,
+  candidate: DetectedDocument | null
+) => {
+  if (!candidate) return current;
+  if (!current || candidate.score > current.score) return candidate;
+  return current;
+};
+
 const findOpenCvQuadrilateral = (
   cv: OpenCvApi,
   mat: OpenCvMatLike,
@@ -365,54 +375,73 @@ const findOpenCvQuadrilateral = (
   const edges = new cv.Mat();
   const closed = new cv.Mat();
   const hierarchy = new cv.Mat();
-  const contours = new cv.MatVector();
   const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
   let best: DetectedDocument | null = null;
-
-  try {
-    cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0);
-    cv.Canny(blurred, edges, 36, 118);
-    cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
-    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
+  const evaluateContours = (contours: InstanceType<OpenCvApi['MatVector']>) => {
     for (let index = 0; index < contours.size(); index += 1) {
       const contour = contours.get(index);
-      const approx = new cv.Mat();
 
       try {
         const area = cv.contourArea(contour);
         const frameArea = frameWidth * frameHeight;
-        if (area < frameArea * 0.035 || area > frameArea * 0.88) continue;
+        if (area < frameArea * 0.02 || area > frameArea * 0.92) continue;
 
         const perimeter = cv.arcLength(contour, true);
-        cv.approxPolyDP(contour, approx, perimeter * 0.026, true);
-        const corners = cornersFromApprox(approx);
-        if (!corners) continue;
+        for (const epsilonRatio of [0.018, 0.026, 0.038]) {
+          const approx = new cv.Mat();
 
-        const match = isScannableShape(corners, frameWidth, frameHeight, 'opencv');
-        if (!match) continue;
+          try {
+            cv.approxPolyDP(contour, approx, perimeter * epsilonRatio, true);
+            const corners = cornersFromApprox(approx);
+            if (!corners) continue;
 
-        const candidate: DetectedDocument = {
-          corners,
-          frameWidth,
-          frameHeight,
-          areaRatio: match.areaRatio,
-          center: match.center,
-          score: match.score,
-        };
+            const match = isScannableShape(corners, frameWidth, frameHeight, 'opencv');
+            if (!match) continue;
 
-        if (!best || candidate.score > best.score) {
-          best = candidate;
+            const candidate: DetectedDocument = {
+              corners,
+              frameWidth,
+              frameHeight,
+              areaRatio: match.areaRatio,
+              center: match.center,
+              score: match.score,
+            };
+
+            best = pickBetterDetection(best, candidate);
+          } finally {
+            approx.delete();
+          }
         }
       } finally {
-        approx.delete();
         contour.delete();
+      }
+    }
+  };
+
+  try {
+    cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0, 0);
+    for (const [low, high] of [
+      [24, 92],
+      [36, 118],
+      [52, 154],
+    ]) {
+      cv.Canny(blurred, edges, low, high);
+      cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
+      const contours = new cv.MatVector();
+
+      try {
+        cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        evaluateContours(contours);
+
+        const currentBest = best as DetectedDocument | null;
+        if (currentBest && currentBest.score > 2.25) break;
+      } finally {
+        contours.delete();
       }
     }
   } finally {
     kernel.delete();
-    contours.delete();
     hierarchy.delete();
     closed.delete();
     edges.delete();
@@ -621,6 +650,7 @@ export function WebDocumentScanner({
   const scannerRef = useRef<ScannerInstance | null>(null);
   const detectedRef = useRef<DetectedDocument | null>(null);
   const previousDetectedRef = useRef<DetectedDocument | null>(null);
+  const detectedLastSeenAtRef = useRef(0);
   const stableSinceRef = useRef<number | null>(null);
   const lastAutoCaptureAtRef = useRef(0);
   const autoCaptureRef = useRef(true);
@@ -673,6 +703,7 @@ export function WebDocumentScanner({
     const resetDetection = () => {
       detectedRef.current = null;
       previousDetectedRef.current = null;
+      detectedLastSeenAtRef.current = 0;
       stableSinceRef.current = null;
     };
 
@@ -743,9 +774,7 @@ export function WebDocumentScanner({
                 frameCanvas.height
               );
 
-              if (openCvDetected && (!nextDetected || openCvDetected.score > nextDetected.score)) {
-                nextDetected = openCvDetected;
-              }
+              nextDetected = pickBetterDetection(nextDetected, openCvDetected);
 
               mat.delete();
 
@@ -756,9 +785,10 @@ export function WebDocumentScanner({
                 );
                 const shift = detectionShift(smoothedDetected, previousDetectedRef.current);
                 stableSinceRef.current =
-                  shift < 0.04 ? stableSinceRef.current ?? now : now;
+                  shift < 0.07 ? stableSinceRef.current ?? now : now;
                 previousDetectedRef.current = smoothedDetected;
                 detectedRef.current = smoothedDetected;
+                detectedLastSeenAtRef.current = now;
                 setHint(autoCaptureRef.current ? '対象を検出中 自動撮影します' : '対象を検出中');
 
                 const stableFor = now - (stableSinceRef.current ?? now);
@@ -773,8 +803,17 @@ export function WebDocumentScanner({
                   void capture('auto');
                 }
               } else {
-                resetDetection();
-                setHint('スキャン対象を枠内に入れてください');
+                stableSinceRef.current = null;
+
+                if (
+                  detectedRef.current &&
+                  now - detectedLastSeenAtRef.current < DETECTION_HOLD_MS
+                ) {
+                  setHint('対象を保持中');
+                } else {
+                  resetDetection();
+                  setHint('スキャン対象を枠内に入れてください');
+                }
               }
             }
           }
@@ -989,7 +1028,7 @@ const styles = {
   },
   closeButton: {
     position: 'absolute',
-    top: 'max(24px, env(safe-area-inset-top))',
+    top: 'max(18px, env(safe-area-inset-top))',
     left: 24,
     width: 58,
     height: 58,
@@ -998,7 +1037,11 @@ const styles = {
     background: 'rgba(18, 34, 45, 0.62)',
     color: '#fff',
     fontSize: 36,
-    lineHeight: '48px',
+    lineHeight: 1,
+    padding: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     cursor: 'pointer',
     backdropFilter: 'blur(10px)',
   },
