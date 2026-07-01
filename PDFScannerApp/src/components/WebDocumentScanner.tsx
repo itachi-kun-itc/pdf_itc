@@ -3,9 +3,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import {
-  createDocumentScanner,
-  DocumentCorners,
-  DocumentPoint,
+    createDocumentScanner,
+    DocumentCorners,
+    DocumentPoint,
 } from '@/utils/document-scanner';
 
 type WebDocumentScannerProps = {
@@ -81,16 +81,16 @@ type OpenCvApi = {
 const A4_WIDTH = 1240;
 const A4_HEIGHT = 1754;
 const A4_RATIO = A4_HEIGHT / A4_WIDTH;
-const OUTPUT_LONG_SIDE = A4_HEIGHT;
-const OUTPUT_MIN_SHORT_SIDE = 640;
+const OUTPUT_LONG_SIDE = 2200;
+const OUTPUT_MIN_SHORT_SIDE = 1200;
 const DETECT_INTERVAL_MS = 150;
 const DETECTION_MAX_FRAME_WIDTH = 1440;
-const DETECTION_HOLD_MS = 4200;
-const AUTO_CAPTURE_STABLE_MS = 650;
-const AUTO_CAPTURE_COOLDOWN_MS = 2200;
-const AUTO_CAPTURE_RECENT_DETECTION_MS = 1500;
-const AUTO_CAPTURE_MIN_SCORE = 1.62;
-const CAPTURE_CORNER_EXPANSION = 0.018;
+const DETECTION_HOLD_MS = 6000;
+const AUTO_CAPTURE_STABLE_MS = 1100;
+const AUTO_CAPTURE_COOLDOWN_MS = 1800;
+const AUTO_CAPTURE_RECENT_DETECTION_MS = 1800;
+const AUTO_CAPTURE_MIN_SCORE = 2.04;
+const CAPTURE_CORNER_EXPANSION = 0.024;
 const DETECTION_SMALL_SHIFT_THRESHOLD = 0.035;
 const DETECTION_RESET_SHIFT_THRESHOLD = 0.2;
 const DETECTION_SMOOTHING_SOFT = 0.22;
@@ -522,9 +522,12 @@ const enhanceDocumentCanvas = (
   targetWidth = source.width,
   targetHeight = source.height
 ) => {
+  const upscaleFactor = Math.max(1, Math.min(2, Math.round(Math.max(targetWidth, targetHeight) / 1400)));
+  const renderWidth = Math.round(targetWidth * upscaleFactor);
+  const renderHeight = Math.round(targetHeight * upscaleFactor);
   const canvas = document.createElement('canvas');
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
+  canvas.width = renderWidth;
+  canvas.height = renderHeight;
 
   const context = canvas.getContext('2d');
   if (!context) return source;
@@ -546,13 +549,13 @@ const enhanceDocumentCanvas = (
     const blue = data[index + 2];
     const luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
     const normalized = clamp(((luminance - low) / range) * 255);
-    const gammaAdjusted = Math.pow(normalized / 255, 0.82) * 255;
+    const gammaAdjusted = Math.pow(normalized / 255, 0.84) * 255;
     const highlightCompressed =
-      luminance > 218 ? gammaAdjusted * 0.82 + 32 : gammaAdjusted;
-    const contrasted = (highlightCompressed - 128) * 1.18 + 142;
-    const paperLift = contrasted > 178 ? clamp(contrasted + 28) : contrasted;
-    const inkDeepen = paperLift < 152 ? clamp(paperLift - 42) : paperLift;
-    const saturation = luminance > 220 ? 0.62 : 0.82;
+      luminance > 218 ? gammaAdjusted * 0.84 + 36 : gammaAdjusted;
+    const contrasted = (highlightCompressed - 128) * 1.12 + 144;
+    const paperLift = contrasted > 180 ? clamp(contrasted + 22) : contrasted;
+    const inkDeepen = paperLift < 158 ? clamp(paperLift - 40) : paperLift;
+    const saturation = luminance > 220 ? 0.64 : 0.84;
 
     data[index] = clamp(inkDeepen + (red - luminance) * saturation);
     data[index + 1] = clamp(inkDeepen + (green - luminance) * saturation);
@@ -560,11 +563,23 @@ const enhanceDocumentCanvas = (
   }
 
   context.putImageData(image, 0, 0);
-  context.filter = 'contrast(1.12) brightness(1.03) saturate(1.08)';
+  context.filter = 'contrast(1.08) brightness(1.02) saturate(1.06)';
   context.drawImage(canvas, 0, 0);
   context.filter = 'none';
 
-  return canvas;
+  const outputCanvas = document.createElement('canvas');
+  outputCanvas.width = targetWidth;
+  outputCanvas.height = targetHeight;
+  const outputContext = outputCanvas.getContext('2d');
+  if (!outputContext) return canvas;
+
+  outputContext.fillStyle = '#fff';
+  outputContext.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+  outputContext.imageSmoothingEnabled = true;
+  outputContext.imageSmoothingQuality = 'high';
+  outputContext.drawImage(canvas, 0, 0, outputCanvas.width, outputCanvas.height);
+
+  return outputCanvas;
 };
 
 const fallbackGuideCorners = (width: number, height: number): DocumentCorners => {
@@ -962,8 +977,9 @@ export function WebDocumentScanner({
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
+            width: { ideal: 1920, min: 1280 },
+            height: { ideal: 1080, min: 720 },
+            frameRate: { ideal: 30, max: 30 },
           },
           audio: false,
         });

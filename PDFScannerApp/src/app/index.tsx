@@ -1,22 +1,22 @@
 import { useEffect, useState } from 'react';
 import {
-  Alert,
-  Image,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    Alert,
+    Image,
+    Modal,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import DraggableFlatList, {
-  RenderItemParams,
+    RenderItemParams,
 } from 'react-native-draggable-flatlist';
 
 import { PdfPreview } from '@/components/PdfPreview';
@@ -1196,7 +1196,8 @@ export default function HomeScreen() {
     >
       <Pressable
         style={styles.deleteButton}
-        onPress={() => {
+        onPress={(event) => {
+          event.stopPropagation();
           void deleteCreatedPdf(item);
         }}
       >
@@ -1374,7 +1375,7 @@ export default function HomeScreen() {
           style={styles.modalBackdrop}
           onPress={() => setCameraModeVisible(false)}
         >
-          <Pressable style={styles.modalSheet} onPress={() => {}}>
+          <View style={styles.modalSheet} pointerEvents="box-none">
             <Text style={styles.modalTitle}>撮影方法を選択</Text>
 
             <Pressable
@@ -1433,7 +1434,7 @@ export default function HomeScreen() {
             >
               <Text style={styles.modalCancelText}>キャンセル</Text>
             </Pressable>
-          </Pressable>
+          </View>
         </Pressable>
       </Modal>
 
